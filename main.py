@@ -2,6 +2,7 @@ import sys
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import pandas as pd
+import yfinance as yf
 import numpy as np
 
 from loadData import MarketDataFetcher
@@ -9,126 +10,111 @@ from optimize import PortfolioOptimizer
 from visualize import PortfolioVisualizer
 
 
+def get_valid_tickers(initial_tickers):
+    valid_tickers = []
+    current_list = initial_tickers
+    i = 0
+    while i < len(current_list):
+        ticker = current_list[i]
+        print(f"Checking {ticker}...")
+        try:
+            stock = yf.Ticker(ticker)
+            hist = stock.history(period="1d")
+            if hist.empty:
+                raise ValueError
+            valid_tickers.append(ticker)
+        except:
+            print(f"\n[!] ALERT: '{ticker}' is invalid.")
+            choice = input(
+                f"Would you like to (R)eplace it, (S)kip it, or (Q)uit? "
+            ).lower()
+            if choice == "r":
+                new_ticker = input("Enter replacement: ").strip().upper()
+                current_list[i] = new_ticker
+                continue
+            elif choice == "q":
+                sys.exit(0)
+        i += 1
+    return valid_tickers
+
+
 def main():
     print("=" * 60)
-    print("   SECURE PORTFOLIO OPTIMIZER & INVESTMENT PLANNER")
+    print("   PROFESSIONAL PORTFOLIO OPTIMIZER")
     print("=" * 60)
 
-    # 1. User Configuration & Input Scrubbing
-    try:
-        ticker_input = input("\nEnter tickers (e.g., AAPL, MSFT, TSLA, XOM): ")
-        # Remove duplicates while preserving order
-        input_list = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
-        unique_tickers = list(dict.fromkeys(input_list))
+    # 1. Inputs
+    raw_input = input("\nEnter tickers (e.g., AAPL, NVDA, XOM): ")
+    tickers = list(
+        dict.fromkeys([t.strip().upper() for t in raw_input.split(",") if t.strip()])
+    )
+    valid_tickers = get_valid_tickers(tickers)
 
-        if not unique_tickers:
-            raise ValueError("No tickers provided.")
+    amount_input = input("\nEnter investment amount (e.g., $100,000): ")
+    capital = float("".join(c for c in amount_input if c.isdigit() or c == "."))
 
-        capital_input = input("Enter total investment amount (e.g., $21,000 CAD): $")
-        # Clean numeric input: keep only digits and decimal points
-        clean_capital = "".join(c for c in capital_input if c.isdigit() or c == ".")
-        total_capital = float(clean_capital)
+    # 2. Set Diversification Rules
+    print("\n--- Diversification Settings ---")
+    min_p = float(input("Minimum % per stock (e.g., 5): ")) / 100
+    max_p = float(input("Maximum % per stock (e.g., 35): ")) / 100
 
-        # Detect currency label for display purposes
-        currency_label = (
-            "".join(c for c in capital_input if c.isalpha()).upper() or "USD"
+    # Quick check: min_p * num_assets cannot exceed 100%
+    if min_p * len(valid_tickers) > 1.0:
+        print(
+            f"[ERROR] Min allocation of {min_p:.0%} for {len(valid_tickers)} stocks is impossible (>100%)."
         )
+        return
 
-        if total_capital <= 0:
-            raise ValueError("Investment capital must be greater than zero.")
-
-    except ValueError as e:
-        print(f"[ERROR] Invalid input: {e}")
-        sys.exit(1)
-
-    # Date Range: Last 5 Years
+    # 3. Process
     end_date = datetime.today()
     start_date = end_date - relativedelta(years=5)
+    fetcher = MarketDataFetcher(valid_tickers, start_date, end_date)
+    optimizer = PortfolioOptimizer(risk_free_rate=fetcher.get_live_risk_free_rate())
 
-    # 2. Initialize Objects
-    fetcher = MarketDataFetcher(unique_tickers, start_date, end_date)
-    rf_rate = fetcher.get_live_risk_free_rate()
-    optimizer = PortfolioOptimizer(risk_free_rate=rf_rate)
-
-    # 3. Execute Pipeline
     try:
-        # DATA FETCHING & VALIDATION
         data = fetcher.fetch_data()
+        returns, cov = fetcher.calculate_annualized_metrics(data)
 
-        # After fetch_data(), the fetcher.tickers list may have shrunk
-        # because it drops invalid/delisted tickers. We use the updated list.
-        valid_tickers = fetcher.tickers
+        # 4. Optimized with Diversification Bounds
+        # We pass the custom bounds here
+        bounds = tuple((min_p, max_p) for _ in range(len(valid_tickers)))
 
-        if not valid_tickers:
-            raise ValueError(
-                "The ticker list is empty after cleaning. Cannot optimize."
-            )
+        # We need to tweak optimize.py slightly to accept these bounds as an argument
+        # For now, let's assume we update optimize.py maximize_sharpe_ratio(self, annual_returns, annual_cov_matrix, bounds=None)
+        optimal_weights = optimizer.maximize_sharpe_ratio(returns, cov, bounds=bounds)
 
-        print("Calculating annualized metrics...")
-        annual_returns, annual_cov_matrix = fetcher.calculate_annualized_metrics(data)
-
-        print(f"Optimizing for {len(valid_tickers)} assets...")
-        # NOTE: If you want to change max allocation for any one stock,
-        # adjust the bounds in optimize.py (e.g., 0.40 for 40% max).
-        optimal_weights = optimizer.maximize_sharpe_ratio(
-            annual_returns, annual_cov_matrix
-        )
-
-        opt_return, opt_volatility = optimizer.portfolio_performance(
-            optimal_weights, annual_returns, annual_cov_matrix
-        )
-
-        opt_sharpe = optimizer.calculate_sharpe_ratio(opt_return, opt_volatility)
+        p_ret, p_vol = optimizer.portfolio_performance(optimal_weights, returns, cov)
         last_prices = data.iloc[-1]
 
-    except Exception as e:
-        print(f"\n[CRITICAL ERROR]: {str(e)}")
-        sys.exit(1)
+        # 5. Output Results
+        print("\n" + "=" * 60)
+        print(f"DIVERSIFIED INVESTMENT PLAN (${capital:,.2f})")
+        print("=" * 60)
 
-    # 4. Final Output Table
-    print("\n" + "=" * 60)
-    print(f"INVESTMENT PLAN ({currency_label})")
-    print("=" * 60)
-
-    allocation_results = []
-    for i, ticker in enumerate(valid_tickers):
-        weight = optimal_weights[i]
-        # Hide assets with less than 0.1% allocation
-        if weight > 0.001:
-            position_value = total_capital * weight
-            price = last_prices[ticker]
-            shares = position_value / price
-
-            allocation_results.append(
-                {
-                    "Ticker": ticker,
-                    "Weight": f"{weight:.2%}",
-                    "Value": f"{position_value:,.2f}",
-                    "Price": f"{price:,.2f}",
-                    "Shares": round(shares, 4),
-                }
+        plan = []
+        for i, ticker in enumerate(valid_tickers):
+            weight = optimal_weights[i]
+            val = capital * weight
+            plan.append(
+                [
+                    ticker,
+                    f"{weight:.2%}",
+                    f"${val:,.2f}",
+                    round(val / last_prices[ticker], 2),
+                ]
             )
 
-    df_plan = pd.DataFrame(allocation_results)
-    if df_plan.empty:
-        print("Optimization resulted in no valid allocations.")
-    else:
-        print(df_plan.to_string(index=False))
+        df = pd.DataFrame(plan, columns=["Ticker", "Weight", "Value", "Shares"])
+        print(df.to_string(index=False))
+        print("-" * 60)
+        print(f"Expected Return: {p_ret:.2%} | Volatility: {p_vol:.2%}")
+        print(f"Sharpe Ratio: {(p_ret - optimizer.risk_free_rate)/p_vol:.2f}")
+        print("=" * 60)
 
-    print("-" * 60)
-    print(f"Expected Annual Return: {opt_return:.2%}")
-    print(f"Portfolio Volatility:   {opt_volatility:.2%}")
-    print(f"Sharpe Ratio:           {opt_sharpe:.2f}")
-    print(f"Risk-Free Rate Bench:   {rf_rate:.2%}")
-    print("=" * 60)
+        PortfolioVisualizer.plot_asset_allocation(valid_tickers, optimal_weights)
 
-    # 5. Visualization
-    try:
-        PortfolioVisualizer.plot_asset_allocation(
-            valid_tickers, optimal_weights, chart_title="Optimized Asset Allocation"
-        )
     except Exception as e:
-        print(f"\n[WARNING] Could not generate chart: {e}")
+        print(f"[ERROR] {e}")
 
 
 if __name__ == "__main__":

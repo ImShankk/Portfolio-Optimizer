@@ -103,44 +103,22 @@ class PortfolioOptimizer:
 
         return -(p_ret - self.risk_free_rate) / p_vol
 
-    def maximize_sharpe_ratio(self, annual_returns, annual_cov_matrix):
+    def maximize_sharpe_ratio(self, annual_returns, annual_cov_matrix, bounds=None):
         """
-        Maximizes the Sharpe ratio using Sequential Least Squares Programming (SLSQP).
+        Maximizes the Sharpe ratio with support for custom diversification bounds.
         """
         try:
             num_assets = len(annual_returns)
         except TypeError:
-            raise ValueError(
-                "`annual_returns` must be a 1-D array-like object with length equal to the number of assets."
-            )
-
-        try:
-            cov_shape = annual_cov_matrix.shape
-        except AttributeError:
-            raise ValueError(
-                "`annual_cov_matrix` must be an array-like object with a 2-D shape."
-            )
-
-        if len(cov_shape) != 2:
-            raise ValueError(
-                f"`annual_cov_matrix` must be 2-D, but has shape {cov_shape}."
-            )
-
-        rows, cols = cov_shape
-        if rows != cols:
-            raise ValueError(
-                f"`annual_cov_matrix` must be square, but has shape {cov_shape}."
-            )
-
-        if rows != num_assets:
-            raise ValueError(
-                f"Dimension mismatch: annual_returns has length {num_assets} but annual_cov_matrix has shape {cov_shape}."
-            )
+            raise ValueError("`annual_returns` must be a 1-D array-like object.")
 
         args = (annual_returns, annual_cov_matrix)
         constraints = {"type": "eq", "fun": lambda x: np.sum(x) - 1}
-        # To this (Max 50% in any one stock):
-        bounds = tuple((0, 0.40) for _ in range(num_assets))
+
+        # Default to 0-100% if no specific bounds are provided
+        if bounds is None:
+            bounds = tuple((0, 1) for _ in range(num_assets))
+
         init_guess = np.full(num_assets, 1.0 / num_assets)
 
         result = minimize(
