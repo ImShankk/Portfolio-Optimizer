@@ -11,110 +11,149 @@ from visualize import PortfolioVisualizer
 
 
 def get_valid_tickers(initial_tickers):
-    valid_tickers = []
-    current_list = initial_tickers
+    valid = []
+    curr = initial_tickers
     i = 0
-    while i < len(current_list):
-        ticker = current_list[i]
+    while i < len(curr):
+        ticker = curr[i]
         print(f"Checking {ticker}...")
         try:
-            stock = yf.Ticker(ticker)
-            hist = stock.history(period="1d")
-            if hist.empty:
+            if yf.Ticker(ticker).history(period="1d").empty:
                 raise ValueError
-            valid_tickers.append(ticker)
+            valid.append(ticker)
         except:
-            print(f"\n[!] ALERT: '{ticker}' is invalid.")
-            choice = input(
-                f"Would you like to (R)eplace it, (S)kip it, or (Q)uit? "
-            ).lower()
+            print(f"\n[!] '{ticker}' is invalid.")
+            choice = input("(R)eplace, (S)kip, or (Q)uit? ").lower()
             if choice == "r":
-                new_ticker = input("Enter replacement: ").strip().upper()
-                current_list[i] = new_ticker
+                curr[i] = input("New Ticker: ").strip().upper()
                 continue
             elif choice == "q":
                 sys.exit(0)
         i += 1
-    return valid_tickers
+    return valid
 
 
 def main():
-    print("=" * 60)
-    print("   PROFESSIONAL PORTFOLIO OPTIMIZER")
-    print("=" * 60)
+    print("=" * 60 + "\n   INTELLIGENT PORTFOLIO OPTIMIZER v4.5\n" + "=" * 60)
 
-    # 1. Inputs
-    raw_input = input("\nEnter tickers (e.g., AAPL, NVDA, XOM): ")
+    # 1. Tickers
+    t_in = input("\nEnter tickers (e.g. AAPL, NVDA, SPY): ")
     tickers = list(
-        dict.fromkeys([t.strip().upper() for t in raw_input.split(",") if t.strip()])
+        dict.fromkeys([t.strip().upper() for t in t_in.split(",") if t.strip()])
     )
     valid_tickers = get_valid_tickers(tickers)
 
-    amount_input = input("\nEnter investment amount (e.g., $100,000): ")
-    capital = float("".join(c for c in amount_input if c.isdigit() or c == "."))
+    # 2. Capital (Updated Robust Logic)
+    while True:
+        cap_in = input("\nEnter total investment amount (e.g. 100,000.00): ")
+        # Remove commas first
+        temp_cap = cap_in.replace(",", "")
+        # Now clean any other symbols
+        clean = "".join(c for c in temp_cap if c.isdigit() or c == ".")
+        try:
+            total_capital = float(clean)
+            if total_capital > 0:
+                break
+        except:
+            print("[!] Invalid amount. Please enter a number like 100000.")
 
-    # 2. Set Diversification Rules
+    # 3. Diversification
     print("\n--- Diversification Settings ---")
-    min_p = float(input("Minimum % per stock (e.g., 5): ")) / 100
-    max_p = float(input("Maximum % per stock (e.g., 35): ")) / 100
+    min_p, max_p = 0.0, 1.0
+    if input("Set a Minimum % per stock? (y/n): ").lower() == "y":
+        min_p = float(input("Min %: ")) / 100
+    if input("Set a Maximum % per stock? (y/n): ").lower() == "y":
+        max_p = float(input("Max %: ")) / 100
 
-    # Quick check: min_p * num_assets cannot exceed 100%
-    if min_p * len(valid_tickers) > 1.0:
-        print(
-            f"[ERROR] Min allocation of {min_p:.0%} for {len(valid_tickers)} stocks is impossible (>100%)."
-        )
-        return
+    # 4. Strategy
+    print(
+        "\n--- Strategy ---\n1. Max Sharpe (Aggressive)\n2. Min Volatility (Conservative + ETF Preference)"
+    )
+    strat = input("Choice (1 or 2): ")
 
-    # 3. Process
+    # 5. Pipeline
     end_date = datetime.today()
     start_date = end_date - relativedelta(years=5)
     fetcher = MarketDataFetcher(valid_tickers, start_date, end_date)
-    optimizer = PortfolioOptimizer(risk_free_rate=fetcher.get_live_risk_free_rate())
+    optimizer = PortfolioOptimizer(fetcher.get_live_risk_free_rate())
 
     try:
         data = fetcher.fetch_data()
-        returns, cov = fetcher.calculate_annualized_metrics(data)
-
-        # 4. Optimized with Diversification Bounds
-        # We pass the custom bounds here
+        rets, cov = fetcher.calculate_annualized_metrics(data)
         bounds = tuple((min_p, max_p) for _ in range(len(valid_tickers)))
 
-        # We need to tweak optimize.py slightly to accept these bounds as an argument
-        # For now, let's assume we update optimize.py maximize_sharpe_ratio(self, annual_returns, annual_cov_matrix, bounds=None)
-        optimal_weights = optimizer.maximize_sharpe_ratio(returns, cov, bounds=bounds)
+        if strat == "2":
+            print("Optimizing for Minimum Risk (with Strong ETF Preference)...")
+            weights = optimizer.minimize_volatility(rets, cov, valid_tickers, bounds)
+        else:
+            weights = optimizer.maximize_sharpe_ratio(rets, cov, bounds)
 
-        p_ret, p_vol = optimizer.portfolio_performance(optimal_weights, returns, cov)
-        last_prices = data.iloc[-1]
+        p_ret, p_vol = optimizer.portfolio_performance(weights, rets, cov)
 
-        # 5. Output Results
-        print("\n" + "=" * 60)
-        print(f"DIVERSIFIED INVESTMENT PLAN (${capital:,.2f})")
-        print("=" * 60)
+        # 6. Benchmark Logic
+        print("Fetching Benchmark Data (SPY)...")
+        bench_df = yf.download("SPY", period="1y", progress=False)
+        spy_prices = (
+            bench_df["Adj Close"]
+            if "Adj Close" in bench_df.columns
+            else bench_df["Close"]
+        )
 
-        plan = []
-        for i, ticker in enumerate(valid_tickers):
-            weight = optimal_weights[i]
-            val = capital * weight
-            plan.append(
-                [
-                    ticker,
-                    f"{weight:.2%}",
-                    f"${val:,.2f}",
-                    round(val / last_prices[ticker], 2),
-                ]
+        # Using .iloc[0].item() ensures we get a single number, not a "Series"
+        spy_start = (
+            float(spy_prices.iloc[0].item())
+            if hasattr(spy_prices.iloc[0], "item")
+            else float(spy_prices.iloc[0])
+        )
+        spy_end = (
+            float(spy_prices.iloc[-1].item())
+            if hasattr(spy_prices.iloc[-1], "item")
+            else float(spy_prices.iloc[-1])
+        )
+        spy_1y_ret = (spy_end / spy_start) - 1
+
+        # 7. Final Report
+        print(
+            "\n"
+            + "=" * 95
+            + f"\nINTELLIGENT INVESTMENT PLAN (${total_capital:,.2f})\n"
+            + "=" * 95
+        )
+        res = []
+        for i, t in enumerate(valid_tickers):
+            w = weights[i]
+            v = total_capital * w
+            last_p = float(data.iloc[-1][t])
+            proj_v = v * np.exp(rets[t])
+            res.append(
+                [t, f"{w:.2%}", f"${v:,.2f}", round(v / last_p, 2), f"${proj_v:,.2f}"]
             )
 
-        df = pd.DataFrame(plan, columns=["Ticker", "Weight", "Value", "Shares"])
+        df = pd.DataFrame(
+            res, columns=["Ticker", "Weight", "Value", "Shares", "Proj. 1Y Value"]
+        )
         print(df.to_string(index=False))
-        print("-" * 60)
-        print(f"Expected Return: {p_ret:.2%} | Volatility: {p_vol:.2%}")
-        print(f"Sharpe Ratio: {(p_ret - optimizer.risk_free_rate)/p_vol:.2f}")
-        print("=" * 60)
+        print("-" * 95)
 
-        PortfolioVisualizer.plot_asset_allocation(valid_tickers, optimal_weights)
+        p_simple_ret = np.exp(p_ret) - 1
+        print(f"Portfolio Expected 1Y Return: {float(p_simple_ret):.2%}")
+        print(f"S&P 500 (SPY) 1Y Performance:  {float(spy_1y_ret):.2%}")
+        print(
+            f"Status vs Benchmark:           {'OUTPERFORMING' if p_simple_ret > spy_1y_ret else 'UNDERPERFORMING'}"
+        )
+        print(f"Portfolio Volatility:          {float(p_vol):.2%}")
+        print("-" * 95)
+
+        proj_total = total_capital * np.exp(p_ret)
+        print(
+            f"ESTIMATED 1-YEAR TOTAL: ${float(proj_total):,.2f} (Gain: ${float(proj_total-total_capital):,.2f})"
+        )
+        print("=" * 95)
+
+        PortfolioVisualizer.plot_asset_allocation(valid_tickers, weights)
 
     except Exception as e:
-        print(f"[ERROR] {e}")
+        print(f"\n[ERROR]: {str(e)}")
 
 
 if __name__ == "__main__":
