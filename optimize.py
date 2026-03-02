@@ -38,8 +38,6 @@ class PortfolioOptimizer:
                 weights, annual_returns, annual_cov_matrix
             )
 
-            # --- AUTO-ADAPTIVE DIVERSITY ---
-            # We apply a penalty based on asset type.
             # Single stocks get a 'Concentration Tax' that grows as they get bigger.
             concentration_penalty = 0
             etf_weights = []
